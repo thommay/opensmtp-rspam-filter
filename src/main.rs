@@ -1,7 +1,13 @@
 use std::collections::HashMap;
 use std::fmt;
+use serde::{Deserialize, Deserializer};
+use serde::de::Error;
+use serde_json::Value;
+use std::error::Error as StdError;
 
-fn main() -> Result<(), std::io::Error> {
+type BoxResult<T> = Result<T,Box<StdError>>;
+
+fn main() -> BoxResult<()> {
     let mut controller = Controller {
         callbacks: HashMap::new(),
         sessions: HashMap::new(),
@@ -163,9 +169,10 @@ fn filter_data_cb(
     if let Some(args) = args {
         let line = &args[0];
         if let Some(ses) = ctrl.sessions.get_mut(&id) {
-            match ses.add_data_line(line) {
+            match ses.add_data_line(line).expect("Failed to add line") {
                 Data::Complete => {
-                    let json = ses.submit_to_rspamd();
+                    let json = ses.submit_to_rspamd().expect("Failed to submit message to RSpam");
+                    ses.respond(json, token.unwrap())
                 }
                 _ => return,
             }
@@ -285,43 +292,80 @@ struct Session<'b> {
     session_id: String,
     payload: Vec<String>,
     reason: String,
+    message: Option<email::MimeMessage>,
 }
 
 impl<'b> Session<'b> {
-    pub fn add_data_line(&mut self, line: &str) -> Data {
+    pub fn add_data_line(&mut self, line: &str) -> BoxResult<Data> {
         match line {
-            "." => Data::Complete,
+            "." => {
+                let raw = self.payload.join("\n");
+                let message = email::MimeMessage::parse(&raw)?;
+                self.message = Some(message);
+                Ok(Data::Complete)
+            },
             _ => {
                 self.payload.push(line.into());
-                Data::Ongoing
+                Ok(Data::Ongoing)
             }
         }
     }
 
-    fn submit_to_rspamd(&self) -> Result<Rspam, std::io::Error> {
+    fn submit_to_rspamd(&self) -> BoxResult<Rspam> {
         let mut headers = reqwest::header::HeaderMap::new();
         for (k, v) in self.control.iter() {
-            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes()).unwrap();
-            headers.insert(name, v.parse().unwrap());
+            let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())?;
+            headers.insert(name, v.parse()?);
         }
-        let raw = self.payload.join("\n");
-        let message = email::MimeMessage::parse(&raw).unwrap().as_string();
-        dbg!(&headers);
-        dbg!(&message);
-        let client = reqwest::Client::new();
-        client
-            .post("http://localhost:11333/checkv2")
-            .headers(headers)
-            .body(message)
-            .send()
-            .unwrap()
-            .json()
-            .unwrap()
+        if let Some(message) = &self.message {
+            dbg!(&headers);
+            dbg!(&message);
+            let client = reqwest::Client::new();
+            let result = client
+                .post("http://localhost:11333/checkv2")
+                .headers(headers)
+                .body(message.as_string())
+                .send()?
+                .json()?;
+            Ok(result)
+        } else { Err(From::from("Failed to get message"))}
+    }
+
+    fn respond(&mut self, json: Rspam, token: String) {
+        if let Some(message) = &self.message {
+        }
     }
 }
 
 #[derive(Deserialize)]
-struct Rspam {}
+struct Rspam {
+    #[serde(rename="is_skipped")]
+    skipped: bool,
+    score: f32,
+    required_score: f32,
+    #[serde(deserialize_with="deserialize_action")]
+    action: RspamActions,
+    symbols: Option<Value>,
+    urls: Option<Vec<String>>,
+    emails: Option<Vec<String>>,
+    #[serde(rename="message-id")]
+    message_id: Option<Value>,
+}
+
+fn deserialize_action<'de, D>(deserializer: D) -> Result<RspamActions, D::Error>
+    where D: Deserializer<'de>
+{
+    let act = String::deserialize(deserializer)?;
+    match act.as_ref() {
+        "no action" => Ok(RspamActions::None),
+        "greylist" => Ok(RspamActions::Greylist),
+        "add header" => Ok(RspamActions::AddHeader),
+        "rewrite subject" => Ok(RspamActions::Rewrite),
+        "soft reject" => Ok(RspamActions::SoftReject),
+        "reject" => Ok(RspamActions::Reject),
+        _ => Err(D::Error::custom("got unexpected action"))
+    }
+}
 
 #[derive(Debug, Default)]
 struct Event {
@@ -338,4 +382,13 @@ struct Event {
 enum Data {
     Complete,
     Ongoing,
+}
+
+enum RspamActions {
+    None, // message is likely ham (please notice space, not an underscore)
+    Greylist, // message should be greylisted
+    AddHeader, // message is suspicious and should be marked as spam (please notice space, not an underscore)
+    Rewrite, // message is suspicious and should have subject rewritten
+    SoftReject, // message should be temporary rejected (for example, due to rate limit exhausting)
+    Reject, //message should be rejected as spam
 }

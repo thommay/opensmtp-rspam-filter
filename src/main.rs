@@ -385,9 +385,9 @@ enum Data {
 }
 
 enum RspamActions {
-    None, // message is likely ham (please notice space, not an underscore)
+    None, // message is likely ham
     Greylist, // message should be greylisted
-    AddHeader, // message is suspicious and should be marked as spam (please notice space, not an underscore)
+    AddHeader, // message is suspicious and should be marked as spam
     Rewrite, // message is suspicious and should have subject rewritten
     SoftReject, // message should be temporary rejected (for example, due to rate limit exhausting)
     Reject, //message should be rejected as spam

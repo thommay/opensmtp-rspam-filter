@@ -1,11 +1,12 @@
-use std::collections::HashMap;
-use std::fmt;
-use serde::{Deserialize, Deserializer};
+use email::Header;
 use serde::de::Error;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::error::Error as StdError;
+use std::fmt;
 
-type BoxResult<T> = Result<T,Box<StdError>>;
+type BoxResult<T> = Result<T, Box<StdError>>;
 
 fn main() -> BoxResult<()> {
     let mut controller = Controller {
@@ -13,29 +14,28 @@ fn main() -> BoxResult<()> {
         sessions: HashMap::new(),
     };
 
-    controller.add_callback("link-connect", link_connect_cb);
-    controller.add_callback("link-identify", link_identify_cb);
-    controller.add_callback("tx-begin", tx_begin_cb);
-    controller.add_callback("tx-mail", tx_mail_cb);
-    controller.add_callback("tx-rcpt", tx_rcpt_cb);
-    controller.add_callback("tx-data", tx_data_cb);
-    controller.add_callback("tx-commit", tx_cleanup_cb);
-    controller.add_callback("tx-rollback", tx_cleanup_cb);
+    controller.add_callback(Register::Report, "link-connect", link_connect_cb);
+    controller.add_callback(Register::Report, "link-identify", link_identify_cb);
+    controller.add_callback(Register::Report, "tx-begin", tx_begin_cb);
+    controller.add_callback(Register::Report, "tx-mail", tx_mail_cb);
+    controller.add_callback(Register::Report, "tx-rcpt", tx_rcpt_cb);
+    controller.add_callback(Register::Report, "tx-data", tx_data_cb);
+    controller.add_callback(Register::Report, "tx-commit", tx_cleanup_cb);
+    controller.add_callback(Register::Report, "tx-rollback", tx_cleanup_cb);
 
-    controller.add_callback("commit", filter_commit_cb);
-    controller.add_callback("data-line", filter_data_cb);
+    controller.add_callback(Register::Filter, "commit", filter_commit_cb);
+    controller.add_callback(Register::Filter, "data-line", filter_data_cb);
 
-    controller.add_callback("link-disconnect", |ctrl, _, _, id, _| {
+    controller.add_callback(Register::Report, "link-disconnect", |ctrl, _, _, id, _| {
         ctrl.sessions.remove(&id);
     });
 
+    println!("register|ready");
     loop {
         let mut buffer = String::new();
         std::io::stdin().read_line(&mut buffer)?;
         let event = parse_event(buffer);
-        dbg!(&event);
         controller.run_event_callback(event);
-        dbg!(&controller);
     }
 }
 
@@ -171,8 +171,11 @@ fn filter_data_cb(
         if let Some(ses) = ctrl.sessions.get_mut(&id) {
             match ses.add_data_line(line).expect("Failed to add line") {
                 Data::Complete => {
-                    let json = ses.submit_to_rspamd().expect("Failed to submit message to RSpam");
-                    ses.respond(json, token.unwrap())
+                    let json = ses
+                        .submit_to_rspamd()
+                        .expect("Failed to submit message to RSpam");
+                    ses.respond(json, &token.unwrap())
+                        .expect("Failed to deal with response from RSpam");
                 }
                 _ => return,
             }
@@ -212,6 +215,10 @@ fn proceed(tok: Option<String>, id: String) {
         tok.expect("Failed to extract token"),
         id,
     )
+}
+
+fn dataline(token: &str, id: &str, line: &str) {
+    println!("filter-dataline|{}|{}|{}", token, id, line)
 }
 
 fn parse_event(b: String) -> Event {
@@ -265,15 +272,20 @@ impl<'a> fmt::Debug for Controller<'a> {
 impl<'a> Controller<'a> {
     fn add_callback(
         &mut self,
+        event: Register,
         name: &'a str,
         f: fn(&mut Controller, String, Option<String>, String, Option<Vec<String>>),
     ) {
+        match event {
+            Register::Event => println!("register|report|smtp-in|*"),
+            Register::Report => println!("register|report|smtp-in|{}", name),
+            Register::Filter => println!("register|filter|smtp-in|{}", name),
+        }
         self.callbacks.insert(name, Box::new(f));
     }
 
     fn run_event_callback(&mut self, event: Event) {
         let name: &str = event.event.as_ref();
-        dbg!(name);
         if let Some(c) = self.callbacks.get(name) {
             c(
                 self,
@@ -292,23 +304,23 @@ struct Session<'b> {
     session_id: String,
     payload: Vec<String>,
     reason: String,
-    message: Option<email::MimeMessage>,
 }
 
 impl<'b> Session<'b> {
     pub fn add_data_line(&mut self, line: &str) -> BoxResult<Data> {
         match line {
-            "." => {
-                let raw = self.payload.join("\n");
-                let message = email::MimeMessage::parse(&raw)?;
-                self.message = Some(message);
-                Ok(Data::Complete)
-            },
+            "." => Ok(Data::Complete),
             _ => {
                 self.payload.push(line.into());
                 Ok(Data::Ongoing)
             }
         }
+    }
+
+    fn parse_message(&self) -> BoxResult<email::MimeMessage> {
+        let raw = self.payload.join("\n");
+        let message = email::MimeMessage::parse(&raw)?;
+        Ok(message)
     }
 
     fn submit_to_rspamd(&self) -> BoxResult<Rspam> {
@@ -317,43 +329,95 @@ impl<'b> Session<'b> {
             let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())?;
             headers.insert(name, v.parse()?);
         }
-        if let Some(message) = &self.message {
-            dbg!(&headers);
-            dbg!(&message);
-            let client = reqwest::Client::new();
-            let result = client
-                .post("http://localhost:11333/checkv2")
-                .headers(headers)
-                .body(message.as_string())
-                .send()?
-                .json()?;
-            Ok(result)
-        } else { Err(From::from("Failed to get message"))}
+        let message = self.parse_message()?;
+        let client = reqwest::Client::new();
+        let result = client
+            .post("http://localhost:11333/checkv2")
+            .headers(headers)
+            .body(message.as_string())
+            .send()?
+            .json()?;
+        Ok(result)
     }
 
-    fn respond(&mut self, json: Rspam, token: String) {
-        if let Some(message) = &self.message {
+    fn respond(&mut self, json: Rspam, token: &str) -> BoxResult<()> {
+        let mut message = self.parse_message()?;
+        match json.action {
+            RspamActions::Greylist => {
+                self.reason = String::from("421 greylisted");
+                message.headers.insert(Header::new(
+                    "X-Spam-Action".into(),
+                    String::from("greylist"),
+                ));
+            }
+            RspamActions::AddHeader => {
+                message
+                    .headers
+                    .insert(Header::new("X-Spam".into(), String::from("yes")));
+                message.headers.insert(Header::new(
+                    "X-Spam-Action".into(),
+                    String::from("add header"),
+                ));
+            }
+            RspamActions::Rewrite => {
+                message.headers.insert(Header::new(
+                    "X-Spam-Action".into(),
+                    String::from("rewrite subject"),
+                ));
+                if let Some(subj) = json.subject {
+                    message.headers.insert(Header::new("Subject".into(), subj));
+                }
+            }
+            RspamActions::SoftReject => {
+                message.headers.insert(Header::new(
+                    "X-Spam-Action".into(),
+                    String::from("soft reject"),
+                ));
+                self.reason = String::from("451 try again later");
+            }
+            RspamActions::Reject => {
+                message
+                    .headers
+                    .insert(Header::new("X-Spam-Action".into(), String::from("reject")));
+                self.reason = String::from("550 message rejected");
+            }
+            _ => message.headers.insert(Header::new(
+                "X-Spam-Action".into(),
+                String::from("no action"),
+            )),
         }
+        message.headers.insert(Header::new(
+            "X-Spam-Score".into(),
+            format!("{} / {}", json.score, json.required_score),
+        ));
+        let id = &self.session_id;
+        for line in message.as_string().split("\n") {
+            dataline(token, id, line);
+        }
+        dataline(token, id, ".");
+        Ok(())
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct Rspam {
-    #[serde(rename="is_skipped")]
+    #[serde(rename = "is_skipped")]
     skipped: bool,
     score: f32,
     required_score: f32,
-    #[serde(deserialize_with="deserialize_action")]
+    #[serde(deserialize_with = "deserialize_action")]
     action: RspamActions,
     symbols: Option<Value>,
     urls: Option<Vec<String>>,
     emails: Option<Vec<String>>,
-    #[serde(rename="message-id")]
+    #[serde(rename = "message-id")]
     message_id: Option<Value>,
+    subject: Option<String>,
 }
 
 fn deserialize_action<'de, D>(deserializer: D) -> Result<RspamActions, D::Error>
-    where D: Deserializer<'de>
+where
+    D: Deserializer<'de>,
 {
     let act = String::deserialize(deserializer)?;
     match act.as_ref() {
@@ -363,7 +427,7 @@ fn deserialize_action<'de, D>(deserializer: D) -> Result<RspamActions, D::Error>
         "rewrite subject" => Ok(RspamActions::Rewrite),
         "soft reject" => Ok(RspamActions::SoftReject),
         "reject" => Ok(RspamActions::Reject),
-        _ => Err(D::Error::custom("got unexpected action"))
+        _ => Err(D::Error::custom("got unexpected action")),
     }
 }
 
@@ -384,11 +448,18 @@ enum Data {
     Ongoing,
 }
 
+#[derive(Debug)]
 enum RspamActions {
-    None, // message is likely ham
-    Greylist, // message should be greylisted
-    AddHeader, // message is suspicious and should be marked as spam
-    Rewrite, // message is suspicious and should have subject rewritten
+    None,       // message is likely ham
+    Greylist,   // message should be greylisted
+    AddHeader,  // message is suspicious and should be marked as spam
+    Rewrite,    // message is suspicious and should have subject rewritten
     SoftReject, // message should be temporary rejected (for example, due to rate limit exhausting)
-    Reject, //message should be rejected as spam
+    Reject,     //message should be rejected as spam
+}
+
+enum Register {
+    Filter,
+    Report,
+    Event,
 }

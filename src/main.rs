@@ -2,6 +2,8 @@ use email::Header;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
+use slog::{debug, info, o, Drain};
+use slog_syslog::Facility;
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;
@@ -9,9 +11,16 @@ use std::fmt;
 type BoxResult<T> = Result<T, Box<StdError>>;
 
 fn main() -> BoxResult<()> {
+    let drain = slog_syslog::unix_3164(Facility::LOG_MAIL)?.fuse();
+    // let decorator = slog_term::TermDecorator::new().build();
+    // let drain = slog_term::CompactFormat::new(decorator).build().fuse();
+    let drain = slog_async::Async::new(drain).build().fuse();
+    let _log = slog::Logger::root(drain, o!());
+
     let mut controller = Controller {
         callbacks: HashMap::new(),
         sessions: HashMap::new(),
+        logger: _log.new(o!("module"=>"controller")),
     };
 
     controller.add_callback(Register::Report, "link-connect", link_connect_cb);
@@ -31,11 +40,14 @@ fn main() -> BoxResult<()> {
     });
 
     println!("register|ready");
+    info!(_log, "opensmtp rspam filter ready to start");
     loop {
         let mut buffer = String::new();
         std::io::stdin().read_line(&mut buffer)?;
-        let event = parse_event(buffer);
-        controller.run_event_callback(event);
+        for line in buffer.split_terminator("\n") {
+            let event = parse_event(line.into());
+            controller.run_event_callback(event);
+        }
     }
 }
 
@@ -150,12 +162,24 @@ fn link_connect_cb(
         let rdns = &args[0];
         let laddr: Vec<&str> = args[2].split(":").collect();
         if laddr[0] != "local" {
-            ses.control.insert("ip", laddr[0].into());
+            if laddr[0] == "IPv6" {
+                if let Some((_, elements)) = laddr.split_first() {
+                    if let Some((_, addr)) = elements.split_last() {
+                        ses.control.insert("ip", addr.join(":"));
+                    }
+                }
+            } else {
+                ses.control.insert("ip", laddr[0].into());
+            }
         }
         if !rdns.is_empty() {
             ses.control.insert("hostname", rdns.to_string());
         }
     }
+    info!(
+        ctrl.logger,
+        "Creating fresh session {:?} with id: {}", ses, id
+    );
     ctrl.sessions.insert(id, ses);
 }
 
@@ -171,13 +195,16 @@ fn filter_data_cb(
         if let Some(ses) = ctrl.sessions.get_mut(&id) {
             match ses.add_data_line(line).expect("Failed to add line") {
                 Data::Complete => {
+                    info!(ctrl.logger, "submitting {} to RSpamd", id);
                     let json = ses
                         .submit_to_rspamd()
                         .expect("Failed to submit message to RSpam");
                     ses.respond(json, &token.unwrap())
                         .expect("Failed to deal with response from RSpam");
                 }
-                _ => return,
+                _ => {
+                    return;
+                }
             }
         }
     }
@@ -242,8 +269,8 @@ fn parse_event(b: String) -> Event {
                 timestamp: fields[2].into(),
                 subsystem: fields[3].into(),
                 event: fields[4].into(),
-                token: Some(fields[5].into()),
-                session_id: fields[6].into(),
+                session_id: fields[5].into(),
+                token: Some(fields[6].into()),
                 data: None,
             };
             if fields.len() > 7 {
@@ -261,6 +288,7 @@ struct Controller<'a> {
         Box<fn(&mut Controller, String, Option<String>, String, Option<Vec<String>>)>,
     >,
     sessions: HashMap<String, Session<'a>>,
+    logger: slog::Logger,
 }
 
 impl<'a> fmt::Debug for Controller<'a> {

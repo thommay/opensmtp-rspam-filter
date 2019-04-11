@@ -37,13 +37,14 @@ fn main() -> BoxResult<()> {
 
     controller.add_callback(Register::Report, "link-disconnect", |ctrl, _, _, id, _| {
         ctrl.sessions.remove(&id);
+        info!(ctrl.logger, "Currently tracking {} sessions", ctrl.sessions.len());
     });
 
     println!("register|ready");
     info!(_log, "opensmtp rspam filter ready to start");
     loop {
         let mut buffer = String::new();
-        std::io::stdin().read_line(&mut buffer)?;
+        std::io::stdin().read_line(&mut buffer).expect("Failed to read line");
         for line in buffer.split_terminator("\n") {
             let event = parse_event(line.into());
             controller.run_event_callback(event);

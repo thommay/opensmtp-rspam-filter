@@ -2,7 +2,7 @@ use email::Header;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use slog::{debug, info, o, Drain};
+use slog::{info, o, Drain};
 use slog_syslog::Facility;
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -36,18 +36,29 @@ fn main() -> BoxResult<()> {
     controller.add_callback(Register::Filter, "data-line", filter_data_cb);
 
     controller.add_callback(Register::Report, "link-disconnect", |ctrl, _, _, id, _| {
+        info!(ctrl.logger, "Removing session: {}", id);
         ctrl.sessions.remove(&id);
-        info!(ctrl.logger, "Currently tracking {} sessions", ctrl.sessions.len());
+        info!(
+            ctrl.logger,
+            "Currently tracking {} sessions",
+            ctrl.sessions.len()
+        );
     });
 
     println!("register|ready");
     info!(_log, "opensmtp rspam filter ready to start");
     loop {
         let mut buffer = String::new();
-        std::io::stdin().read_line(&mut buffer).expect("Failed to read line");
+        std::io::stdin()
+            .read_line(&mut buffer)
+            .expect("Failed to read line");
         for line in buffer.split_terminator("\n") {
             let event = parse_event(line.into());
-            controller.run_event_callback(event);
+            if let Ok(e) = event {
+                controller.run_event_callback(e);
+            } else {
+                info!(_log, "unrecognised event");
+            }
         }
     }
 }
@@ -74,6 +85,7 @@ fn tx_cleanup_cb(
     id: String,
     _: Option<Vec<String>>,
 ) {
+    info!(ctrl.logger, "Starting new session: {}", id);
     if let Some(ses) = ctrl.sessions.get_mut(&id) {
         ses.control = HashMap::new();
     }
@@ -155,8 +167,11 @@ fn link_connect_cb(
     args: Option<Vec<String>>,
 ) {
     let mut ses = Session {
+        control: HashMap::new(),
         session_id: id.clone(),
-        ..Default::default()
+        payload: vec![],
+        reason: String::new(),
+        logger: ctrl.logger.new(o!("module"=>"session", "id"=>id.clone())),
     };
     ses.control.insert("pass", String::from("all"));
     if let Some(args) = args {
@@ -197,11 +212,14 @@ fn filter_data_cb(
             match ses.add_data_line(line).expect("Failed to add line") {
                 Data::Complete => {
                     info!(ctrl.logger, "submitting {} to RSpamd", id);
-                    let json = ses
-                        .submit_to_rspamd()
-                        .expect("Failed to submit message to RSpam");
-                    ses.respond(json, &token.unwrap())
-                        .expect("Failed to deal with response from RSpam");
+                    match ses.submit_to_rspamd() {
+                        Ok(json) => {
+                            info!(ctrl.logger, "Got response {:?} from rspam", &json);
+                            ses.respond(json, &token.unwrap())
+                                .expect("Failed to deal with response from RSpam");
+                        }
+                        Err(e) => info!(ctrl.logger, "Failed to submit to rspamd: {:?}", e),
+                    }
                 }
                 _ => {
                     return;
@@ -249,11 +267,11 @@ fn dataline(token: &str, id: &str, line: &str) {
     println!("filter-dataline|{}|{}|{}", token, id, line)
 }
 
-fn parse_event(b: String) -> Event {
+fn parse_event(b: String) -> BoxResult<Event> {
     let mut fields: Vec<&str> = b.trim().split('|').collect();
     let kind = fields[0];
     match kind {
-        "report" => Event {
+        "report" => Ok(Event {
             kind: kind.into(),
             version: fields[1].into(),
             timestamp: fields[2].into(),
@@ -262,7 +280,7 @@ fn parse_event(b: String) -> Event {
             session_id: fields[5].into(),
             data: None,
             token: None,
-        },
+        }),
         "filter" => {
             let mut e = Event {
                 kind: kind.into(),
@@ -277,9 +295,9 @@ fn parse_event(b: String) -> Event {
             if fields.len() > 7 {
                 e.data = Some(fields.drain(7..).map(String::from).collect());
             }
-            e
+            Ok(e)
         }
-        _ => unreachable!(),
+        _ => Err(std::io::Error::new(std::io::ErrorKind::Other, "unrecognised event").into()),
     }
 }
 
@@ -327,12 +345,13 @@ impl<'a> Controller<'a> {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Session<'b> {
     control: HashMap<&'b str, String>,
     session_id: String,
     payload: Vec<String>,
     reason: String,
+    logger: slog::Logger,
 }
 
 impl<'b> Session<'b> {
@@ -348,24 +367,30 @@ impl<'b> Session<'b> {
 
     fn parse_message(&self) -> BoxResult<email::MimeMessage> {
         let raw = self.payload.join("\n");
+        info!(self.logger, "Parsing {:?}", &raw);
         let message = email::MimeMessage::parse(&raw)?;
         Ok(message)
     }
 
     fn submit_to_rspamd(&self) -> BoxResult<Rspam> {
         let mut headers = reqwest::header::HeaderMap::new();
+        info!(self.logger, "Setting headers");
         for (k, v) in self.control.iter() {
             let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())?;
             headers.insert(name, v.parse()?);
         }
+        info!(self.logger, "Parsing message");
         let message = self.parse_message()?;
+        info!(self.logger, "Creating http client");
         let client = reqwest::Client::new();
+        info!(self.logger, "Ready to submit to RSpamd");
         let result = client
             .post("http://localhost:11333/checkv2")
             .headers(headers)
             .body(message.as_string())
             .send()?
             .json()?;
+        info!(self.logger, "Succesfully submitted to RSpamd");
         Ok(result)
     }
 

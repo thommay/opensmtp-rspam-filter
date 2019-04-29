@@ -7,7 +7,7 @@ edition = "2018"
 [dependencies]
 chrono = "*"
 reqwest = "*"
-email = "*"
+email = { git = "https://github.com/thommay/rust-email.git", branch = "fix_distinguished_boundaries" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.38"
 slog = "*"

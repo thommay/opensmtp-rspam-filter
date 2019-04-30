@@ -2,7 +2,7 @@ use email::Header;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use slog::{info, o, Drain};
+use slog::{debug, info, o, Drain};
 use slog_syslog::Facility;
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -36,9 +36,8 @@ fn main() -> BoxResult<()> {
     controller.add_callback(Register::Filter, "data-line", filter_data_cb);
 
     controller.add_callback(Register::Report, "link-disconnect", |ctrl, _, _, id, _| {
-        info!(ctrl.logger, "Removing session: {}", id);
         ctrl.sessions.remove(&id);
-        info!(
+        debug!(
             ctrl.logger,
             "Currently tracking {} sessions",
             ctrl.sessions.len()
@@ -85,7 +84,7 @@ fn tx_cleanup_cb(
     id: String,
     _: Option<Vec<String>>,
 ) {
-    info!(ctrl.logger, "Starting new session: {}", id);
+    debug!(ctrl.logger, "Starting new session: {}", id);
     if let Some(ses) = ctrl.sessions.get_mut(&id) {
         ses.control = HashMap::new();
     }
@@ -192,7 +191,7 @@ fn link_connect_cb(
             ses.control.insert("hostname", rdns.to_string());
         }
     }
-    info!(
+    debug!(
         ctrl.logger,
         "Creating fresh session {:?} with id: {}", ses, id
     );
@@ -211,10 +210,10 @@ fn filter_data_cb(
         if let Some(ses) = ctrl.sessions.get_mut(&id) {
             match ses.add_data_line(line).expect("Failed to add line") {
                 Data::Complete => {
-                    info!(ctrl.logger, "submitting {} to RSpamd", id);
+                    debug!(ctrl.logger, "submitting {} to RSpamd", id);
                     match ses.submit_to_rspamd() {
                         Ok(json) => {
-                            info!(ctrl.logger, "Got response {:?} from rspam", &json);
+                            debug!(ctrl.logger, "Got response {:?} from rspam", &json);
                             ses.respond(json, &token.unwrap())
                                 .expect("Failed to deal with response from RSpam");
                         }
@@ -367,30 +366,30 @@ impl<'b> Session<'b> {
 
     fn parse_message(&self) -> BoxResult<email::MimeMessage> {
         let raw = self.payload.join("\n");
-        info!(self.logger, "Parsing {:?}", &raw);
+        debug!(self.logger, "Parsing {:?}", &raw);
         let message = email::MimeMessage::parse(&raw)?;
         Ok(message)
     }
 
     fn submit_to_rspamd(&self) -> BoxResult<Rspam> {
         let mut headers = reqwest::header::HeaderMap::new();
-        info!(self.logger, "Setting headers");
+        debug!(self.logger, "Setting headers");
         for (k, v) in self.control.iter() {
             let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())?;
             headers.insert(name, v.parse()?);
         }
-        info!(self.logger, "Parsing message");
+        debug!(self.logger, "Parsing message");
         let message = self.parse_message()?;
-        info!(self.logger, "Creating http client");
+        debug!(self.logger, "Creating http client");
         let client = reqwest::Client::new();
-        info!(self.logger, "Ready to submit to RSpamd");
+        debug!(self.logger, "Ready to submit to RSpamd");
         let result = client
             .post("http://localhost:11333/checkv2")
             .headers(headers)
             .body(message.as_string())
             .send()?
             .json()?;
-        info!(self.logger, "Succesfully submitted to RSpamd");
+        debug!(self.logger, "Succesfully submitted to RSpamd");
         Ok(result)
     }
 

@@ -258,7 +258,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "email"
 version = "0.0.21"
-source = "git+https://github.com/thommay/rust-email.git?branch=fix_distinguished_boundaries#6569414906bceaa0e02af1e34b1f405f8613d4ad"
+source = "git+https://github.com/thommay/rust-email.git?branch=params_with_spaces#159cd1f3b83cad85e18c27a94df4b8188174c12b"
 dependencies = [
  "base64 0.9.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "chrono 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -734,7 +734,7 @@ name = "opensmtp-rspam-filter"
 version = "0.1.0"
 dependencies = [
  "chrono 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",
- "email 0.0.21 (git+https://github.com/thommay/rust-email.git?branch=fix_distinguished_boundaries)",
+ "email 0.0.21 (git+https://github.com/thommay/rust-email.git?branch=params_with_spaces)",
  "reqwest 0.9.15 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.90 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_json 1.0.39 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1614,7 +1614,7 @@ dependencies = [
 "checksum crossbeam-utils 0.6.5 (registry+https://github.com/rust-lang/crates.io-index)" = "f8306fcef4a7b563b76b7dd949ca48f52bc1141aa067d2ea09565f3e2652aa5c"
 "checksum dirs 1.0.5 (registry+https://github.com/rust-lang/crates.io-index)" = "3fd78930633bd1c6e35c4b42b1df7b0cbc6bc191146e512bb3bedf243fcc3901"
 "checksum dtoa 0.4.3 (registry+https://github.com/rust-lang/crates.io-index)" = "6d301140eb411af13d3115f9a562c85cc6b541ade9dfa314132244aaee7489dd"
-"checksum email 0.0.21 (git+https://github.com/thommay/rust-email.git?branch=fix_distinguished_boundaries)" = "<none>"
+"checksum email 0.0.21 (git+https://github.com/thommay/rust-email.git?branch=params_with_spaces)" = "<none>"
 "checksum encoding 0.2.33 (registry+https://github.com/rust-lang/crates.io-index)" = "6b0d943856b990d12d3b55b359144ff341533e516d94098b1d3fc1ac666d36ec"
 "checksum encoding-index-japanese 1.20141219.5 (registry+https://github.com/rust-lang/crates.io-index)" = "04e8b2ff42e9a05335dbf8b5c6f7567e5591d0d916ccef4e0b1710d32a0d0c91"
 "checksum encoding-index-korean 1.20141219.5 (registry+https://github.com/rust-lang/crates.io-index)" = "4dc33fb8e6bcba213fe2f14275f0963fd16f0a02c878e3095ecfdf5bee529d81"

@@ -2,7 +2,7 @@ use email::Header;
 use serde::de::Error;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use slog::{debug, info, o, Drain};
+use slog::{debug, info, warn, o, Drain};
 use slog_syslog::Facility;
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -48,9 +48,10 @@ fn main() -> BoxResult<()> {
     info!(_log, "opensmtp rspam filter ready to start");
     loop {
         let mut buffer = String::new();
-        std::io::stdin()
-            .read_line(&mut buffer)
-            .expect("Failed to read line");
+        if let Err(e) = std::io::stdin().read_line(&mut buffer) {
+            warn!(_log, "Failed to parse line: {:?}", e);
+            continue;
+        }
         for line in buffer.split_terminator("\n") {
             let event = parse_event(line.into());
             if let Ok(e) = event {

@@ -7,8 +7,9 @@ use slog_syslog::Facility;
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;
+use std::cell::RefCell;
 
-type BoxResult<T> = Result<T, Box<StdError>>;
+type BoxResult<T> = Result<T, Box<dyn StdError>>;
 
 fn main() -> BoxResult<()> {
     let drain = slog_syslog::unix_3164(Facility::LOG_MAIL)?.fuse();
@@ -19,28 +20,28 @@ fn main() -> BoxResult<()> {
 
     let mut controller = Controller {
         callbacks: HashMap::new(),
-        sessions: HashMap::new(),
+        sessions: RefCell::new(HashMap::new()),
         logger: _log.new(o!("module"=>"controller")),
     };
 
-    controller.add_callback(Register::Report, "link-connect", link_connect_cb);
-    controller.add_callback(Register::Report, "link-identify", link_identify_cb);
-    controller.add_callback(Register::Report, "tx-begin", tx_begin_cb);
-    controller.add_callback(Register::Report, "tx-mail", tx_mail_cb);
-    controller.add_callback(Register::Report, "tx-rcpt", tx_rcpt_cb);
-    controller.add_callback(Register::Report, "tx-data", tx_data_cb);
-    controller.add_callback(Register::Report, "tx-commit", tx_cleanup_cb);
-    controller.add_callback(Register::Report, "tx-rollback", tx_cleanup_cb);
+    controller.add_callback(Register::Report, "link-connect".to_string(), link_connect_cb);
+    controller.add_callback(Register::Report, "link-identify".to_string(), link_identify_cb);
+    controller.add_callback(Register::Report, "tx-begin".to_string(), tx_begin_cb);
+    controller.add_callback(Register::Report, "tx-mail".to_string(), tx_mail_cb);
+    controller.add_callback(Register::Report, "tx-rcpt".to_string(), tx_rcpt_cb);
+    controller.add_callback(Register::Report, "tx-data".to_string(), tx_data_cb);
+    controller.add_callback(Register::Report, "tx-commit".to_string(), tx_cleanup_cb);
+    controller.add_callback(Register::Report, "tx-rollback".to_string(), tx_cleanup_cb);
 
-    controller.add_callback(Register::Filter, "commit", filter_commit_cb);
-    controller.add_callback(Register::Filter, "data-line", filter_data_cb);
+    controller.add_callback(Register::Filter, "commit".to_string(), filter_commit_cb);
+    controller.add_callback(Register::Filter, "data-line".to_string(), filter_data_cb);
 
-    controller.add_callback(Register::Report, "link-disconnect", |ctrl, _, _, id, _| {
-        ctrl.sessions.remove(&id);
+    controller.add_callback(Register::Report, "link-disconnect".to_string(), |sessions,logger, _, _, id, _| {
+        sessions.remove(&id);
         debug!(
-            ctrl.logger,
+            logger,
             "Currently tracking {} sessions",
-            ctrl.sessions.len()
+            sessions.len()
         );
     });
 
@@ -64,7 +65,8 @@ fn main() -> BoxResult<()> {
 }
 
 fn tx_begin_cb(
-    ctrl: &mut Controller,
+    sessions: &mut HashMap<String, Session>,
+    _: slog::Logger,
     _: String,
     _: Option<String>,
     id: String,
@@ -72,27 +74,29 @@ fn tx_begin_cb(
 ) {
     if let Some(args) = args {
         let tx_id = &args[0];
-        if let Some(ses) = ctrl.sessions.get_mut(&id) {
+        if let Some(ses) = sessions.get_mut(&id) {
             ses.control.insert("queue-id", tx_id.to_string());
         }
     }
 }
 
 fn tx_cleanup_cb(
-    ctrl: &mut Controller,
+    sessions: &mut HashMap<String, Session>,
+    logger: slog::Logger,
     _: String,
     _: Option<String>,
     id: String,
     _: Option<Vec<String>>,
 ) {
-    debug!(ctrl.logger, "Starting new session: {}", id);
-    if let Some(ses) = ctrl.sessions.get_mut(&id) {
+    debug!(logger, "Starting new session: {}", id);
+    if let Some(ses) = sessions.get_mut(&id) {
         ses.control = HashMap::new();
     }
 }
 
 fn tx_mail_cb(
-    ctrl: &mut Controller,
+    sessions: &mut HashMap<String, Session>,
+    _: slog::Logger,
     _: String,
     _: Option<String>,
     id: String,
@@ -102,7 +106,7 @@ fn tx_mail_cb(
         let from = &args[1];
         let status = &args[2];
         if status == "ok" {
-            if let Some(ses) = ctrl.sessions.get_mut(&id) {
+            if let Some(ses) = sessions.get_mut(&id) {
                 ses.control.insert("from", from.to_string());
             }
         }
@@ -110,7 +114,8 @@ fn tx_mail_cb(
 }
 
 fn tx_rcpt_cb(
-    ctrl: &mut Controller,
+    sessions: &mut HashMap<String, Session>,
+    _: slog::Logger,
     _: String,
     _: Option<String>,
     id: String,
@@ -120,7 +125,7 @@ fn tx_rcpt_cb(
         let rcpt = &args[1];
         let status = &args[2];
         if status == "ok" {
-            if let Some(ses) = ctrl.sessions.get_mut(&id) {
+            if let Some(ses) = sessions.get_mut(&id) {
                 ses.control.insert("rcpt", rcpt.to_string());
             }
         }
@@ -128,7 +133,8 @@ fn tx_rcpt_cb(
 }
 
 fn tx_data_cb(
-    ctrl: &mut Controller,
+    sessions: &mut HashMap<String, Session>,
+    _: slog::Logger,
     _: String,
     _: Option<String>,
     id: String,
@@ -137,7 +143,7 @@ fn tx_data_cb(
     if let Some(args) = args {
         let status = &args[1];
         if status == "ok" {
-            if let Some(ses) = ctrl.sessions.get_mut(&id) {
+            if let Some(ses) = sessions.get_mut(&id) {
                 ses.payload = vec![];
             }
         }
@@ -145,7 +151,8 @@ fn tx_data_cb(
 }
 
 fn link_identify_cb(
-    ctrl: &mut Controller,
+    sessions: &mut HashMap<String, Session>,
+    _: slog::Logger,
     _: String,
     _: Option<String>,
     id: String,
@@ -153,14 +160,15 @@ fn link_identify_cb(
 ) {
     if let Some(args) = args {
         let helo = &args[0];
-        if let Some(ses) = ctrl.sessions.get_mut(&id) {
+        if let Some(ses) = sessions.get_mut(&id) {
             ses.control.insert("helo", helo.to_string());
         }
     }
 }
 
 fn link_connect_cb(
-    ctrl: &mut Controller,
+    sessions: &mut HashMap<String, Session>,
+    logger: slog::Logger,
     _: String,
     _: Option<String>,
     id: String,
@@ -171,7 +179,7 @@ fn link_connect_cb(
         session_id: id.clone(),
         payload: vec![],
         reason: String::new(),
-        logger: ctrl.logger.new(o!("module"=>"session", "id"=>id.clone())),
+        logger: logger.new(o!("module"=>"session", "id"=>id.clone())),
     };
     ses.control.insert("pass", String::from("all"));
     if let Some(args) = args {
@@ -193,14 +201,15 @@ fn link_connect_cb(
         }
     }
     debug!(
-        ctrl.logger,
+        logger,
         "Creating fresh session {:?} with id: {}", ses, id
     );
-    ctrl.sessions.insert(id, ses);
+    sessions.insert(id, ses);
 }
 
 fn filter_data_cb(
-    ctrl: &mut Controller,
+    sessions: &mut HashMap<String, Session>,
+    logger: slog::Logger,
     _: String,
     token: Option<String>,
     id: String,
@@ -208,17 +217,17 @@ fn filter_data_cb(
 ) {
     if let Some(args) = args {
         let line = &args[0];
-        if let Some(ses) = ctrl.sessions.get_mut(&id) {
+        if let Some(ses) = sessions.get_mut(&id) {
             match ses.add_data_line(line).expect("Failed to add line") {
                 Data::Complete => {
-                    debug!(ctrl.logger, "submitting {} to RSpamd", id);
+                    debug!(logger, "submitting {} to RSpamd", id);
                     match ses.submit_to_rspamd() {
                         Ok(json) => {
-                            debug!(ctrl.logger, "Got response {:?} from rspam", &json);
+                            debug!(logger, "Got response {:?} from rspam", &json);
                             ses.respond(json, &token.unwrap())
                                 .expect("Failed to deal with response from RSpam");
                         }
-                        Err(e) => info!(ctrl.logger, "Failed to submit to rspamd: {:?}", e),
+                        Err(e) => info!(logger, "Failed to submit to rspamd: {:?}", e),
                     }
                 }
                 _ => {
@@ -230,13 +239,14 @@ fn filter_data_cb(
 }
 
 fn filter_commit_cb(
-    ctrl: &mut Controller,
+    sessions: &mut HashMap<String, Session>,
+    _: slog::Logger,
     _: String,
     token: Option<String>,
     id: String,
     _: Option<Vec<String>>,
 ) {
-    if let Some(ses) = ctrl.sessions.get_mut(&id) {
+    if let Some(ses) = sessions.get_mut(&id) {
         if !ses.reason.is_empty() {
             let reason = &ses.reason;
             reject(token, id, reason.to_string());
@@ -301,27 +311,27 @@ fn parse_event(b: String) -> BoxResult<Event> {
     }
 }
 
-struct Controller<'a> {
+struct Controller {
     callbacks: HashMap<
-        &'a str,
-        Box<fn(&mut Controller, String, Option<String>, String, Option<Vec<String>>)>,
+        String,
+        Box<dyn Fn(&mut HashMap<String, Session>, slog::Logger, String, Option<String>, String, Option<Vec<String>>)>,
     >,
-    sessions: HashMap<String, Session<'a>>,
+    sessions: RefCell<HashMap<String, Session<'static>>>,
     logger: slog::Logger,
 }
 
-impl<'a> fmt::Debug for Controller<'a> {
+impl fmt::Debug for Controller {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Controller: Current sessions: {:?}", self.sessions)
     }
 }
 
-impl<'a> Controller<'a> {
+impl Controller {
     fn add_callback(
         &mut self,
         event: Register,
-        name: &'a str,
-        f: fn(&mut Controller, String, Option<String>, String, Option<Vec<String>>),
+        name: String,
+        f: fn(&mut HashMap<String, Session>, slog::Logger, String, Option<String>, String, Option<Vec<String>>),
     ) {
         match event {
             Register::Event => println!("register|report|smtp-in|*"),
@@ -332,10 +342,12 @@ impl<'a> Controller<'a> {
     }
 
     fn run_event_callback(&mut self, event: Event) {
-        let name: &str = event.event.as_ref();
-        if let Some(c) = self.callbacks.get(name) {
+        let name = event.event;
+        let logger = self.logger.new(o!("callback"=>name.clone()));
+        if let Some(c) = self.callbacks.get(&name) {
             c(
-                self,
+                &mut self.sessions.borrow_mut(),
+                logger,
                 event.timestamp,
                 event.token,
                 event.session_id,

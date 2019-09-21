@@ -6,7 +6,7 @@
       <sourceFolder url="file://$MODULE_DIR$/../opensmtp-rspam-filter\examples" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/../opensmtp-rspam-filter\tests" isTestSource="true" />
       <sourceFolder url="file://$MODULE_DIR$/../opensmtp-rspam-filter\benches" isTestSource="true" />
-      <excludeFolder url="file://$MODULE_DIR$/../opensmtp-rspam-filter\target" />
+      <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />
     <orderEntry type="sourceFolder" forTests="false" />

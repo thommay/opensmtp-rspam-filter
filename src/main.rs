@@ -393,12 +393,12 @@ impl<'b> Session<'b> {
 
     fn dump_msg(&self, message: &mut str, style: &str, point: &str) {
         let (dir, id) = self.session_id.split_at(2);
-        let mut base = PathBuf::from(DUMP_DIR);
-        base.join(dir).join(id);
-        std::fs::create_dir_all(base).unwrap();
+        let base = PathBuf::from(DUMP_DIR);
+        let mut base = base.join(dir).join(id);
+        std::fs::create_dir_all(&base).unwrap();
         let name = format!("{}-{}", point, style);
-        base.join(name);
-        let mut fh = std::fs::File::create(base).unwrap();
+        base.push(name);
+        let mut fh = std::fs::File::create(&base).unwrap();
         fh.write_all(message.as_bytes()).unwrap();
     }
 

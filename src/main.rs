@@ -1,15 +1,20 @@
-use email::Header;
-use serde::de::Error;
-use serde::{Deserialize, Deserializer};
-use serde_json::Value;
-use slog::{debug, info, warn, o, Drain};
-use slog_syslog::Facility;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;
-use std::cell::RefCell;
+use std::io::Write;
+use std::path::PathBuf;
+
+use email::Header;
+use serde::{Deserialize, Deserializer};
+use serde::de::Error;
+use serde_json::Value;
+use slog::{debug, Drain, info, o, warn};
+use slog_syslog::Facility;
 
 type BoxResult<T> = Result<T, Box<dyn StdError>>;
+
+const DUMP_DIR: &str = "/var/lib/orf-dump";
 
 fn main() -> BoxResult<()> {
     let drain = slog_syslog::unix_3164(Facility::LOG_MAIL)?.fuse();
@@ -377,11 +382,24 @@ impl<'b> Session<'b> {
         }
     }
 
-    fn parse_message(&self) -> BoxResult<email::MimeMessage> {
-        let raw = self.payload.join("\n");
+    fn parse_message(&self, point: &str) -> BoxResult<email::MimeMessage> {
+        let mut raw = self.payload.join("\n");
+        self.dump_msg(&mut raw, "raw", point);
         debug!(self.logger, "Parsing {:?}", &raw);
         let message = email::MimeMessage::parse(&raw)?;
+        self.dump_msg(&mut message.as_string(), "parsed", point);
         Ok(message)
+    }
+
+    fn dump_msg(&self, message: &mut str, style: &str, point: &str) {
+        let (dir, id) = self.session_id.split_at(2);
+        let mut base = PathBuf::from(DUMP_DIR);
+        base.join(dir).join(id);
+        std::fs::create_dir_all(base).unwrap();
+        let name = format!("{}-{}", point, style);
+        base.join(name);
+        let mut fh = std::fs::File::create(base).unwrap();
+        fh.write_all(message.as_bytes()).unwrap();
     }
 
     fn submit_to_rspamd(&self) -> BoxResult<Rspam> {
@@ -392,7 +410,7 @@ impl<'b> Session<'b> {
             headers.insert(name, v.parse()?);
         }
         debug!(self.logger, "Parsing message");
-        let message = self.parse_message()?;
+        let message = self.parse_message("before")?;
         debug!(self.logger, "Creating http client");
         let client = reqwest::Client::new();
         debug!(self.logger, "Ready to submit to RSpamd");
@@ -407,7 +425,7 @@ impl<'b> Session<'b> {
     }
 
     fn respond(&mut self, json: Rspam, token: &str) -> BoxResult<()> {
-        let mut message = self.parse_message()?;
+        let mut message = self.parse_message("after")?;
         match json.action {
             RspamActions::Greylist => {
                 self.reason = String::from("421 greylisted");

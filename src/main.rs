@@ -31,16 +31,17 @@ fn main() -> BoxResult<()> {
 
     controller.add_callback(Register::Report, "link-connect".to_string(), link_connect_cb);
     controller.add_callback(Register::Report, "link-identify".to_string(), link_identify_cb);
-    controller.add_callback(Register::Report, "tx-begin".to_string(), tx_begin_cb);
+    controller.add_callback(Register::Report, "link-greeting".to_string(), link_greeting_cb);
+    controller.add_callback(Register::Report, "link-auth".to_string(), link_auth_cb);
+
     controller.add_callback(Register::Report, "tx-mail".to_string(), tx_mail_cb);
     controller.add_callback(Register::Report, "tx-rcpt".to_string(), tx_rcpt_cb);
-    controller.add_callback(Register::Report, "tx-data".to_string(), tx_data_cb);
-    controller.add_callback(Register::Report, "tx-commit".to_string(), tx_cleanup_cb);
-    controller.add_callback(Register::Report, "tx-rollback".to_string(), tx_cleanup_cb);
+    controller.add_callback(Register::Report, "tx-begin".to_string(), tx_begin_cb);
 
     controller.add_callback(Register::Filter, "commit".to_string(), filter_commit_cb);
     controller.add_callback(Register::Filter, "data-line".to_string(), filter_data_cb);
 
+    controller.add_callback(Register::Report, "tx-reset".to_string(), tx_reset_cb);
     controller.add_callback(Register::Report, "link-disconnect".to_string(), |sessions,logger, _, _, id, _| {
         sessions.remove(&id);
         debug!(
@@ -85,7 +86,7 @@ fn tx_begin_cb(
     }
 }
 
-fn tx_cleanup_cb(
+fn tx_reset_cb(
     sessions: &mut HashMap<String, Session>,
     logger: slog::Logger,
     _: String,
@@ -137,7 +138,7 @@ fn tx_rcpt_cb(
     }
 }
 
-fn tx_data_cb(
+fn link_auth_cb(
     sessions: &mut HashMap<String, Session>,
     _: slog::Logger,
     _: String,
@@ -147,10 +148,27 @@ fn tx_data_cb(
 ) {
     if let Some(args) = args {
         let status = &args[1];
-        if status == "ok" {
+        let user = &args[0];
+        if status == "pass" {
             if let Some(ses) = sessions.get_mut(&id) {
-                ses.payload = vec![];
+                ses.control.insert("username", user.to_string());
             }
+        }
+    }
+}
+
+fn link_greeting_cb(
+sessions: &mut HashMap<String, Session>,
+    _: slog::Logger,
+    _: String,
+    _: Option<String>,
+    id: String,
+    args: Option<Vec<String>>,
+) {
+    if let Some(args) = args {
+        let mta = &args[0];
+        if let Some(ses) = sessions.get_mut(&id) {
+            ses.control.insert("mta-name", mta.to_string());
         }
     }
 }
@@ -221,7 +239,7 @@ fn filter_data_cb(
     args: Option<Vec<String>>,
 ) {
     if let Some(args) = args {
-        let line = &args[0];
+        let line: &str = &args.join("|");
         if let Some(ses) = sessions.get_mut(&id) {
             match ses.add_data_line(line).expect("Failed to add line") {
                 Data::Complete => {
